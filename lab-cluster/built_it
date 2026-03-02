@@ -1,0 +1,155 @@
+#!/bin/bash
+
+# Prepare nfs directory for storage class
+sudo mkdir /srv/nfs-data
+sudo chmod 777 /srv/nfs-data
+sudo chown nobody:nogroup /srv/nfs-data
+
+# create the kind-config.yaml file
+cat <<EOF > kind-config.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+networking:
+  apiServerAddress: "127.0.0.1"
+  apiServerPort: 6443
+nodes:
+# 1. The Control Plane (NFS Server + API)
+- role: control-plane
+  extraMounts:
+    # Persist the NFS share directory
+  - hostPath: /srv/nfs-data
+    containerPath: /nfsshare
+
+# 2. Worker 1: The "Edge" Node (Ingress + Registry)
+- role: worker
+  kubeadmConfigPatches:
+  - |
+    kind: JoinConfiguration
+    nodeRegistration:
+      kubeletExtraArgs:
+        node-labels: "ingress-ready=true"
+  extraPortMappings:
+  - containerPort: 80
+    hostPort: 80
+  - containerPort: 443
+    hostPort: 443
+  - containerPort: 5000
+    hostPort: 5000
+
+# 3. Worker 2: The "Data" Node (Prometheus + EFK)
+- role: worker
+  kubeadmConfigPatches:
+  - |
+    kind: JoinConfiguration
+    nodeRegistration:
+      kubeletExtraArgs:
+        node-labels: "tier=backend"
+
+EOF
+
+# Create kind cluster
+kind create cluster --config kind-config.yaml --name lab
+
+docker exec -it lab-control-plane bash -c "apt update; apt install -y nfs-kernel-server; echo '/nfsshare *(rw,sync,no_subtree_check,no_root_squash,insecure)' >> /etc/exports; systemctl enable --now nfs-server"
+docker exec -it lab-worker bash -c "apt update; apt install -y nfs-common"
+docker exec -it lab-worker2 bash -c "apt update; apt install -y nfs-common"
+
+# Create ingress controller(nginx)
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
+
+# Metrics
+helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/
+helm repo update
+cat << EOF > metric-values.yaml
+defaultArgs:
+  - --cert-dir=/tmp
+  - --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname
+  - --kubelet-use-node-status-port
+  - --metric-resolution=15s
+  - --kubelet-insecure-tls
+EOF
+helm upgrade --install metrics-server metrics-server/metrics-server --create-namespace --namespace metrics-server --values metric-values.yaml
+
+# Monitoring & Grafana
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+helm install monitoring prometheus-community/kube-prometheus-stack --namespace monitoring --create-namespace
+
+# Alias k
+cat << EOF >> ~/.bash_aliases
+source <(kubectl completion bash)
+alias k=kubectl
+complete -o default -F __start_kubectl k
+EOF
+
+# Create Image Registry
+kubectl create ns image-registry
+cat << EOF > image-registry.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: docker-registry
+  namespace: image-registry
+spec:
+  selector:
+    app: docker-registry
+  ports:
+    - protocol: TCP
+      port: 5000
+      targetPort: 5000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: docker-registry
+  namespace: image-registry
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: docker-registry
+  template:
+    metadata:
+      labels:
+        app: docker-registry
+    spec:
+      containers:
+      - name: registry
+        image: registry:2
+        ports:
+        - containerPort: 5000
+          hostPort: 5000     # this binds to host port
+        volumeMounts:
+        - name: registry-data
+          mountPath: /var/lib/registry
+      volumes:
+      - name: registry-data
+        emptyDir: {} # Use a PVC here for production-like persistence
+EOF
+kubectl apply -f image-registry.yaml
+
+echo 'Edit /etc/docker/daemon.json
+{
+  "insecure-registries": ["localhost:5000", "127.0.0.1:5000"]
+}
+
+systemctl daemon-reload
+systemctl restart docker
+'
+
+echo | sudo tee -a /etc/hosts
+kubectl get no -o jsonpath='{range .items[*]}{.status.addresses[*].address}{"\n"}' | sudo tee -a /etc/hosts
+
+# Remove standard storage class as default
+kubectl annotate sc standard storageclass.kubernetes.io/is-default-class=false --overwrite
+
+# Create a nfs storage class
+helm repo add nfs-subdir-external-provisioner https://kubernetes-sigs.github.io/nfs-subdir-external-provisioner/
+helm repo update
+helm install nfs-provisioner nfs-subdir-external-provisioner/nfs-subdir-external-provisioner \
+	--set nfs.server=$(kubectl get no lab-control-plane -o jsonpath='{.status.addresses[0].address}') \
+	--set nfs.path=/nfsshare \
+	--set storageClass.name=nfs-client \
+	--set storageClass.defaultClass=true \
+        --namespace nfs-storage \
+	--create-namespace

@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Guestbook</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+
+<body>
+  <div class="wrap">
+    <header class="top">
+      <div>
+        <h1>Guestbook</h1>
+        <div class="sub">Flask + Redis demo for Kubernetes probes</div>
+      </div>
+
+      {% if redis_ok %}
+        <div class="badge"><span class="dot good"></span>Redis connected</div>
+      {% else %}
+        <div class="badge"><span class="dot bad"></span>Redis unavailable</div>
+      {% endif %}
+    </header>
+
+    <section class="meta card">
+      <div class="meta-grid">
+        <div class="meta-item">
+          <div class="meta-k">Pod</div>
+          <div class="meta-v">{{ pod_name }}</div>
+        </div>
+        <div class="meta-item">
+          <div class="meta-k">Per-pod hits</div>
+          <div class="meta-v">{{ local_counter }}</div>
+        </div>
+        <div class="meta-item">
+          <div class="meta-k">Global hits</div>
+          <div class="meta-v">
+            {% if global_counter is not none %}
+              {{ global_counter }}
+            {% else %}
+              <span class="muted">n/a (Redis down)</span>
+            {% endif %}
+          </div>
+        </div>
+        <div class="meta-item">
+          <div class="meta-k">Redis host</div>
+          <div class="meta-v">{{ redis_host }}</div>
+        </div>
+      </div>
+    </section>
+
+    <div class="grid">
+      <!-- LEFT: Guestbook -->
+      <section class="card">
+        <div class="card-head">
+          <h2>Leave a message</h2>
+          <p class="muted">Messages are stored in Redis when available.</p>
+        </div>
+
+        <div class="card-body">
+          {% if not redis_ok %}
+            <div class="alert">
+              <strong>We can’t reach Redis right now.</strong>
+              <div class="muted">Your message won’t be saved until Redis is back.</div>
+              {% if redis_error %}
+                <div class="muted small"><strong>Debug:</strong> {{ redis_error }}</div>
+              {% endif %}
+            </div>
+          {% endif %}
+
+          <form method="post" class="form">
+            <input type="text" name="message" placeholder="Write a short message…" maxlength="200" />
+            <button type="submit">Submit</button>
+          </form>
+
+          <h2 class="mt">Messages</h2>
+          {% if messages and messages|length > 0 %}
+            <ul class="list">
+              {% for msg in messages %}
+                <li class="item">
+                  <div class="avatar">✦</div>
+                  <div class="msg">{{ msg }}</div>
+                </li>
+              {% endfor %}
+            </ul>
+          {% else %}
+            <div class="empty">No messages yet. Be the first to say hi 👋</div>
+          {% endif %}
+        </div>
+      </section>
+
+      <!-- RIGHT: Live probes -->
+      <aside class="card">
+        <div class="card-head">
+          <h2>Live probe status</h2>
+          <p class="muted">Updates every 5 seconds.</p>
+        </div>
+
+        <div class="card-body">
+          <div class="probe">
+            <div id="live-dot" class="dot warn"></div>
+            <div>
+              <div class="probe-title">Liveness</div>
+              <div id="live-text" class="muted">Checking…</div>
+              <div class="hint muted">Is the container running?</div>
+            </div>
+          </div>
+
+          <div class="probe">
+            <div id="ready-dot" class="dot warn"></div>
+            <div>
+              <div class="probe-title">Readiness</div>
+              <div id="ready-text" class="muted">Checking…</div>
+              <div class="hint muted">Can it serve traffic (Redis reachable)?</div>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <script>
+    async function checkProbe(url, dotId, textId) {
+      const dot = document.getElementById(dotId);
+      const text = document.getElementById(textId);
+
+      try {
+        const res = await fetch(url, { cache: "no-store" });
+        if (res.ok) {
+          dot.classList.remove("bad", "warn");
+          dot.classList.add("good");
+          text.textContent = "OK";
+        } else {
+          dot.classList.remove("good", "warn");
+          dot.classList.add("bad");
+          text.textContent = "Fail (" + res.status + ")";
+        }
+      } catch (e) {
+        dot.classList.remove("good", "warn");
+        dot.classList.add("bad");
+        text.textContent = "Error";
+      }
+    }
+
+    function runChecks() {
+      checkProbe("/healthz", "live-dot", "live-text");
+      checkProbe("/readyz", "ready-dot", "ready-text");
+    }
+
+    runChecks();
+    setInterval(runChecks, 5000);
+  </script>
+</body>
+</html>
+
