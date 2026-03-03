@@ -1,0 +1,27 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# Environments and Secrets
+.env
+.flaskenv
+*.secret
+*.pem
+
+# IDEs
+.vscode/
+.idea/
+
+# Lab specific
+README.md
+*.zip
+

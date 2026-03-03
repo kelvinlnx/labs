@@ -1,0 +1,37 @@
+# ---- Stage 1: build dependencies ----
+FROM python:3.9-slim AS builder
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --prefix=/install -r requirements.txt
+
+# ---- Stage 2: runtime image ----
+FROM python:3.9-slim AS runtime
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+RUN useradd --create-home appuser
+WORKDIR /home/appuser
+COPY --from=builder --chown=appuser:appuser /install /home/appuser/.local
+COPY --chown=appuser:appuser src/ .
+USER appuser
+EXPOSE 8080
+
+# ---- Stage 3: DevSecOps scan gate (vuln + misconfig + secrets) ----
+FROM aquasec/trivy:latest AS scan
+
+# Copy runtime filesystem into a directory we can scan
+COPY --from=runtime / /rootfs
+
+# 1) Vulnerabilities + secrets + misconfig in one pass
+# - Fail build if HIGH/CRITICAL are found (for vuln findings)
+# - ignore-unfixed keeps output actionable for Day 1
+RUN trivy rootfs /rootfs \
+    --scanners vuln,misconfig,secret \
+    --severity HIGH,CRITICAL \
+    --ignore-unfixed \
+    --exit-code 1 \
+    --no-progress
+# scanner selection is supported as shown in Trivy docs. :contentReference[oaicite:6]{index=6}
+
+# ---- Stage 4: final image (unchanged runtime) ----
+FROM runtime
+CMD ["python", "app.py"]

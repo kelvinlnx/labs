@@ -1,0 +1,4 @@
+echo -n "user-token-$(openssl rand -hex 8)" | base64 > .hideme
+trivy fs --scanners secret --secret-config trivy-secrets.yaml . 
+trivy config --misconfig-scanners=dockerfile ~/labs/0-base
+
