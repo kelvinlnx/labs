@@ -33,9 +33,7 @@ WORKDIR /home/appuser
 COPY --from=builder --chown=appuser:appuser /install /home/appuser/.local
 
 # Copy the application code
-COPY --chown=appuser:appuser app.py .
-COPY --chown=appuser:appuser static static/
-COPY --chown=appuser:appuser templates templates/
+COPY --chown=appuser:appuser src/ .
 
 # Switch to the non‑root user
 USER appuser
