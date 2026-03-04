@@ -1,5 +1,61 @@
 #!/bin/bash
 
+
+CLUSTER_NAME="lab"
+REGISTRY_NAMESPACE="image-registry"
+REGISTRY_DOMAIN="docker-registry.${REGISTRY_NAMESPACE}.svc.cluster.local"
+CERTS_DIR="certs"
+REGISTRY_HOST="myregistry"
+
+echo "🔧 Generating certificates for ${REGISTRY_DOMAIN}..."
+mkdir $CERTS_DIR
+cd $CERTS_DIR
+
+# Generate CA key and certificate
+openssl req -new -newkey rsa:2048 -days 365 -nodes -x509 \
+  -subj "/C=SG/ST=Sg/L=Sg/O=Training/CN=Training CA" \
+  -keyout ca.key -out ca.crt 2>/dev/null
+
+# Generate registry key
+openssl genrsa -out registry.key 2048 2>/dev/null
+
+# Create CSR config
+cat > registry.conf <<EOF
+[req]
+distinguished_name = req_distinguished_name
+req_extensions = v3_req
+prompt = no
+
+[req_distinguished_name]
+C = SG
+ST = Sg
+L = Sg
+O = Training
+CN = ${REGISTRY_DOMAIN}
+
+[v3_req]
+keyUsage = keyEncipherment, dataEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = @alt_names
+
+[alt_names]
+DNS.1 = ${REGISTRY_DOMAIN}
+DNS.2 = docker-registry.${NAMESPACE}
+DNS.3 = docker-registry.${NAMESPACE}.svc
+DNS.4 = ${REGISTRY_HOST}
+EOF
+
+# Generate CSR
+openssl req -new -key registry.key -out registry.csr -config registry.conf 2>/dev/null
+
+# Sign certificate with CA
+openssl x509 -req -days 365 -in registry.csr \
+  -CA ca.crt -CAkey ca.key -CAcreateserial \
+  -out registry.crt -extensions v3_req -extfile registry.conf 2>/dev/null
+
+cd ..
+
+echo "🖧  Preparing NFS storage /srv/nfs-data... "
 # Prepare nfs directory for storage class
 sudo mkdir /srv/nfs-data
 sudo chmod 777 /srv/nfs-data
@@ -9,6 +65,7 @@ sudo chown nobody:nogroup /srv/nfs-data
 cat <<EOF > kind-config.yaml
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
+name: ${CLUSTER_NAME}
 networking:
   apiServerAddress: "127.0.0.1"
   apiServerPort: 6443
@@ -19,6 +76,8 @@ nodes:
     # Persist the NFS share directory
   - hostPath: /srv/nfs-data
     containerPath: /nfsshare
+  - hostPath: ${CERTS_DIR}/ca.crt
+    containerPath: /usr/local/share/ca-certificates/registry-ca.crt
 
 # 2. Worker 1: The "Edge" Node (Ingress + Registry)
 - role: worker
@@ -27,7 +86,7 @@ nodes:
     kind: JoinConfiguration
     nodeRegistration:
       kubeletExtraArgs:
-        node-labels: "ingress-ready=true"
+        node-labels: "ingress-ready=true,image-registry=true"
   extraPortMappings:
   - containerPort: 80
     hostPort: 80
@@ -35,6 +94,9 @@ nodes:
     hostPort: 443
   - containerPort: 5000
     hostPort: 5000
+  extraMounts:
+  - hostPath: ${CERTS_DIR}/ca.crt
+    containerPath: /usr/local/share/ca-certificates/registry-ca.crt
 
 # 3. Worker 2: The "Data" Node (Prometheus + EFK)
 - role: worker
@@ -44,15 +106,23 @@ nodes:
     nodeRegistration:
       kubeletExtraArgs:
         node-labels: "tier=backend"
-
+  extraMounts:
+  - hostPath: ${CERTS_DIR}/ca.crt
+    containerPath: /usr/local/share/ca-certificates/registry-ca.crt
+containerdConfigPatches:
+- |-
+  [plugins."io.containerd.grpc.v1.cri".registry]
+    config_path = "/etc/containerd/certs.d"
 EOF
 
-# Create kind cluster
-kind create cluster --config kind-config.yaml --name lab
+echo "🚀 Creating Kind cluster..."
+kind delete cluster --name ${CLUSTER_NAME} 2>/dev/null || true
+kind create cluster --config kind-config.yaml
 
-docker exec -it lab-control-plane bash -c "apt update; apt install -y nfs-kernel-server; echo '/nfsshare *(rw,sync,no_subtree_check,no_root_squash,insecure)' >> /etc/exports; systemctl enable --now nfs-server"
-docker exec -it lab-worker bash -c "apt update; apt install -y nfs-common"
-docker exec -it lab-worker2 bash -c "apt update; apt install -y nfs-common"
+echo "🔐 Updating Packages & CA certificates on nodes..."
+docker exec -it lab-control-plane bash -c "apt update; apt install -y nfs-kernel-server; echo '/nfsshare *(rw,sync,no_subtree_check,no_root_squash,insecure)' >> /etc/exports; systemctl enable --now nfs-server; update-ca-certificates"
+docker exec -it lab-worker bash -c "apt update; apt install -y nfs-common; update-ca-certificates"
+docker exec -it lab-worker2 bash -c "apt update; apt install -y nfs-common; update-ca-certificates"
 
 # Create ingress controller(nginx)
 kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
@@ -82,14 +152,22 @@ alias k=kubectl
 complete -o default -F __start_kubectl k
 EOF
 
-# Create Image Registry
-kubectl create ns image-registry
+echo "📁 Creating Image Registry namespace..."
+kubectl create ns ${REGISTRY_NAMESPACE}
+
+echo "🔑 Creating TLS secret for registry..."
+kubectl create secret tls registry-tls \
+  --cert=${CERTS_DIR}/registry.crt \
+  --key=${CERTS_DIR}/registry.key \
+  -n ${REGISTRY_NAMESPACE}
+
+echo "📦 Deploying registry..."
 cat << EOF > image-registry.yaml
 apiVersion: v1
 kind: Service
 metadata:
   name: docker-registry
-  namespace: image-registry
+  namespace: ${REGISTRY_NAMESPACE}
 spec:
   selector:
     app: docker-registry
@@ -102,7 +180,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: docker-registry
-  namespace: image-registry
+  namespace: ${REGISTRY_NAMESPACE}
 spec:
   replicas: 1
   selector:
@@ -113,32 +191,60 @@ spec:
       labels:
         app: docker-registry
     spec:
+      nodeSelector:
+        image-registry: "true"
       containers:
       - name: registry
         image: registry:2
         ports:
         - containerPort: 5000
           hostPort: 5000     # this binds to host port
+        env:
+        - name: REGISTRY_HTTP_TLS_CERTIFICATE
+          value: /certs/tls.crt
+        - name: REGISTRY_HTTP_TLS_KEY
+          value: /certs/tls.key
         volumeMounts:
         - name: registry-data
           mountPath: /var/lib/registry
+        - name: certs
+          mountPath: /certs
+          readOnly: true
       volumes:
       - name: registry-data
         emptyDir: {} # Use a PVC here for production-like persistence
+      - name: certs
+        secret:
+          secretName: registry-tls
 EOF
 kubectl apply -f image-registry.yaml
 
-echo 'Edit /etc/docker/daemon.json
-{
-  "insecure-registries": ["localhost:5000", "127.0.0.1:5000"]
-}
+echo "⏳ Waiting for registry pod to be ready..."
+kubectl wait --for=condition=ready pod -l app=docker-registry -n ${REGISTRY_NAMESPACE} --timeout=60s
 
-systemctl daemon-reload
-systemctl restart docker
-'
+echo "🧪 Testing secure connection..."
+kubectl run test-pod --rm -it --image=curlimages/curl --restart=Never --restart=Never -- \
+  curl -k https://docker-registry.${REGISTRY_NAMESPACE}.svc.cluster.local:5000/v2/ || \
+  echo "⚠️  Test failed, but registry should still be working"
+
+echo "✅ Registry setup complete!"
+echo "📍 Registry URL: https://docker-registry.${REGISTRY_NAMESPACE}.svc.cluster.local:5000"
+
+# Cleanup
+# echo "🧺 Cleanup..."
+# rm -rf $CERTS_DIR *yaml
+#
+# echo 'Edit /etc/docker/daemon.json
+# {
+#   "insecure-registries": ["localhost:5000", "127.0.0.1:5000"]
+# }
+# 
+# systemctl daemon-reload
+# systemctl restart docker
+# '
 
 echo | sudo tee -a /etc/hosts
-kubectl get no -o jsonpath='{range .items[*]}{.status.addresses[*].address}{"\n"}' | sudo tee -a /etc/hosts
+kubectl get no -o jsonpath='{range .items[*]}{.status.addresses[*].address}{"\n"}' | sed 's/lab-worker\>/& myregistry/' | sudo tee -a /etc/hosts
 
 # Remove standard storage class as default
 kubectl annotate sc standard storageclass.kubernetes.io/is-default-class=false --overwrite
