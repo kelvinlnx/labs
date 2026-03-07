@@ -251,7 +251,7 @@ echo "📍 Registry URL: https://docker-registry.${REGISTRY_NAMESPACE}.svc.clust
 # '
 
 echo | sudo tee -a /etc/hosts
-kubectl get no -o jsonpath='{range .items[*]}{.status.addresses[*].address}{"\n"}' | sed 's/lab-worker\>/& myregistry/' | sudo tee -a /etc/hosts
+kubectl get no -o jsonpath='{range .items[*]}{.status.addresses[*].address}{"\n"}' | sed 's/lab-worker\>/& myregistry guestbook.kind/' | sudo tee -a /etc/hosts
 
 # Remove standard storage class as default
 kubectl annotate sc standard storageclass.kubernetes.io/is-default-class=false --overwrite
@@ -260,9 +260,10 @@ kubectl annotate sc standard storageclass.kubernetes.io/is-default-class=false -
 helm repo add nfs-subdir-external-provisioner https://kubernetes-sigs.github.io/nfs-subdir-external-provisioner/
 helm repo update
 helm install nfs-provisioner nfs-subdir-external-provisioner/nfs-subdir-external-provisioner \
-	--set nfs.server=$(kubectl get no lab-control-plane -o jsonpath='{.status.addresses[0].address}') \
+	--set nfs.server=lab-control-plane \
 	--set nfs.path=/nfsshare \
 	--set storageClass.name=nfs-client \
 	--set storageClass.defaultClass=true \
         --namespace nfs-storage \
 	--create-namespace
+#	--set nfs.server=$(kubectl get no lab-control-plane -o jsonpath='{.status.addresses[0].address}') \
