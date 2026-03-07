@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: guestbook
+  name: guestbook
+  namespace: guestbook
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: guestbook
+  strategy: {}
+  template:
+    metadata:
+      labels:
+        app: guestbook
+    spec:
+      containers:
+      - image: myregistry:5000/guestbook-frontend:v3
+        name: guestbook-frontend
+        ports:
+        - containerPort: 8080
+        resources: {}
+status: {}

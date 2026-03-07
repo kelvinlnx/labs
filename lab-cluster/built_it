@@ -123,34 +123,41 @@ echo "🔐 Updating Packages & CA certificates on nodes..."
 docker exec -it lab-control-plane bash -c "apt update; apt install -y nfs-kernel-server; echo '/nfsshare *(rw,sync,no_subtree_check,no_root_squash,insecure)' >> /etc/exports; systemctl enable --now nfs-server; update-ca-certificates"
 docker exec -it lab-worker bash -c "apt update; apt install -y nfs-common; update-ca-certificates"
 docker exec -it lab-worker2 bash -c "apt update; apt install -y nfs-common; update-ca-certificates"
+sudo cp ${CERTS_DIR}/ca.crt /usr/local/share/ca-certificates/registry-ca.crt
+sudo update-ca-certificates
 
 # Create ingress controller(nginx)
 kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
+kubectl patch deployment -n ingress-nginx ingress-nginx-controller -p '{"spec":{"template":{"spec":{"nodeSelector":{"ingress-ready":"true"}}}}}'
 
-# Metrics
-helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/
-helm repo update
-cat << EOF > metric-values.yaml
-defaultArgs:
-  - --cert-dir=/tmp
-  - --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname
-  - --kubelet-use-node-status-port
-  - --metric-resolution=15s
-  - --kubelet-insecure-tls
-EOF
-helm upgrade --install metrics-server metrics-server/metrics-server --create-namespace --namespace metrics-server --values metric-values.yaml
-
-# Monitoring & Grafana
-helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-helm repo update
-helm install monitoring prometheus-community/kube-prometheus-stack --namespace monitoring --create-namespace
+## Metrics
+#helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/
+#helm repo update
+#cat << EOF > metric-values.yaml
+#defaultArgs:
+#  - --cert-dir=/tmp
+#  - --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname
+#  - --kubelet-use-node-status-port
+#  - --metric-resolution=15s
+#  - --kubelet-insecure-tls
+#EOF
+#helm upgrade --install metrics-server metrics-server/metrics-server --create-namespace --namespace metrics-server --values metric-values.yaml
+#
+## Monitoring & Grafana
+#helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+#helm repo update
+#helm install monitoring prometheus-community/kube-prometheus-stack --namespace monitoring --create-namespace
 
 # Alias k
+if `grep -q 'alias k=' ~/.bash_aliases 2> /dev/null`; then
+	echo alias k already configured
+else
 cat << EOF >> ~/.bash_aliases
 source <(kubectl completion bash)
 alias k=kubectl
 complete -o default -F __start_kubectl k
 EOF
+fi
 
 echo "📁 Creating Image Registry namespace..."
 kubectl create ns ${REGISTRY_NAMESPACE}

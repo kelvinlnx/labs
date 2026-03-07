@@ -1,0 +1,57 @@
+tempo:
+  repository: grafana/tempo
+
+service:
+  type: ClusterIP
+
+persistence:
+  enabled: true
+  size: 10Gi
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+nodeSelector:
+  tier: backend
+
+tempoConfiguration: |
+  stream_over_http_enabled: true
+
+  server:
+    http_listen_port: 3100
+
+  distributor:
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+          http:
+      zipkin:
+      jaeger:
+        protocols:
+          thrift_http:
+          grpc:
+          thrift_compact:
+
+  ingester:
+    max_block_duration: 5m
+
+  compactor:
+    compaction:
+      block_retention: 24h
+
+  storage:
+    trace:
+      backend: local
+      local:
+        path: /var/tempo/traces
+
+  metrics_generator:
+    processor:
+      service_graphs:
+      span_metrics:

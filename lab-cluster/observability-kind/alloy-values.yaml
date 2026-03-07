@@ -1,0 +1,13 @@
+alloy:
+  configMap:
+    create: false
+    name: alloy-logs-config
+
+controller:
+  type: daemonset
+
+serviceMonitor:
+  enabled: true
+
+rbac:
+  create: true
